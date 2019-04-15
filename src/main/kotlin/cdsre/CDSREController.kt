@@ -2,6 +2,7 @@ package cdsre
 
 import cdsre.files.Project
 import cdsre.files.ROM
+import cdsre.workspace.Workspace
 import javafx.application.Platform
 import javafx.event.ActionEvent
 import javafx.fxml.FXML
@@ -12,12 +13,10 @@ import javafx.scene.control.Menu
 import javafx.scene.control.MenuBar
 import javafx.scene.control.MenuItem
 import javafx.scene.control.ScrollPane
-import javafx.scene.control.SplitPane
 import javafx.scene.control.Tab
 import javafx.scene.control.TabPane
 import javafx.scene.layout.AnchorPane
 import javafx.scene.layout.Pane
-import javafx.scene.layout.VBox
 import javafx.stage.FileChooser
 import java.awt.Desktop
 import java.net.URI
@@ -30,16 +29,10 @@ class CDSREController: Initializable {
 	}
 
 	@FXML
-	lateinit var program: VBox
-
-	@FXML
 	lateinit var menubar: MenuBar
 
 	@FXML
 	lateinit var menu_file: Menu
-
-	@FXML
-	lateinit var menuitem_new: MenuItem
 
 	@FXML
 	lateinit var menuitem_open: MenuItem
@@ -99,7 +92,7 @@ class CDSREController: Initializable {
 	lateinit var menuitem_discord: MenuItem
 
 	@FXML
-	lateinit var main: SplitPane
+	lateinit var menuitem_github: MenuItem
 
 	@FXML
 	lateinit var leftpanel: AnchorPane
@@ -129,7 +122,8 @@ class CDSREController: Initializable {
 
 	@FXML
 	fun switchView(event: ActionEvent) {
-		println("Loading " + (event.source as MenuItem).text + " View")
+		println("Loading " + (event.source as MenuItem).id + " View")
+		var viewToLoad = (event.source as MenuItem).id
 
 		var masterpanel: AnchorPane?
 		var primaryview: AnchorPane?
@@ -139,45 +133,9 @@ class CDSREController: Initializable {
 		var viewLoader: FXMLLoader? = null
 		var detailLoader: FXMLLoader? = null
 
-		when((event.source as MenuItem).text) {
-			menuitem_viewpokemon.text -> {
-				masterLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/master/master_pokemon.fxml"))
-				viewLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/view/view_pokemon.fxml"))
-				detailLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/details/details_pokemon.fxml"))
-				menuitem_new.isDisable = true
-			}
-
-			menuitem_viewmapheaders.text -> {
-				viewLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/view/view_mapheaders.fxml"))
-				detailLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/details/details_mapheaders.fxml"))
-				menuitem_new.isDisable = true
-			}
-			menuitem_viewmatrix.text -> {
-				viewLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/view/view_matrix.fxml"))
-				detailLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/details/details_matrix.fxml"))
-				menuitem_new.isDisable = true
-			}
-			menuitem_viewmap.text -> {
-				viewLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/view/view_map.fxml"))
-				detailLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/details/details_map.fxml"))
-				menuitem_new.isDisable = true
-			}
-			menuitem_viewtext.text -> {
-				viewLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/view/view_text.fxml"))
-				detailLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/details/details_text.fxml"))
-				menuitem_new.isDisable = false
-			}
-			menuitem_viewscript.text -> {
-				viewLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/view/view_script.fxml"))
-				detailLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/details/details_script.fxml"))
-				menuitem_new.isDisable = false
-			}
-			menuitem_viewevent.text -> {
-				viewLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/view/view_event.fxml"))
-				detailLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/details/details_event.fxml"))
-				menuitem_new.isDisable = true
-			}
-		}
+		masterLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/master/master_$viewToLoad.fxml"))
+		viewLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/view/view_$viewToLoad.fxml"))
+		detailLoader = FXMLLoader(this.javaClass.classLoader.getResource("graphics/details/details_$viewToLoad.fxml"))
 
 		masterpanel = AnchorPane(masterLoader!!.load())
 		masterpanel.prefWidthProperty().bind(this.leftpanel.widthProperty())
@@ -200,7 +158,7 @@ class CDSREController: Initializable {
 	fun openLink(event: ActionEvent) {
 		if(Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
 			when((event.source as MenuItem).text) {
-				menuitem_about.text -> Desktop.getDesktop().browse(URI("https://github.com/team-cosmic/cdsre"))
+				menuitem_github.text -> Desktop.getDesktop().browse(URI("https://github.com/team-cosmic/cdsre"))
 				menuitem_discord.text -> Desktop.getDesktop().browse(URI("https://discord.gg/eusTxfA"))
 			}
 		}
@@ -216,21 +174,19 @@ class CDSREController: Initializable {
 			FileChooser.ExtensionFilter("CDSRE Files", "*.nds", "*.crp")
 		)
 
-		val file = fileChooser.showOpenDialog(ClientApp.globalStage)
+		val file = fileChooser.showOpenDialog(Workspace.globalStage)
 			?: return //If file is null, then no file was selected; simply do nothing
 
-		// If file is a .nds, create a new project wrapping around a ***copy*** of it.
-		// If it is a .crp, do some extraction
-		var project: Project? = null
+		println(file.extension)
 
 		if(file.extension == "crp") {
-			project = Project.loadProject(file)
+			Workspace.currentProject = Project.loadProject(file)
 		} else if(file.extension == "nds") {
 			var originalRom: ROM = ROM.loadROM(file)
 			var projectName: String = ""
 			// TODO: Open project creation dialog here
 			// TODO: Unpack ROM into project location
-			project = Project.createProject("", projectName)
+			//project = Project.createProject("", projectName)
 		} else {
 			System.err.println("An invalid file has somehow been loaded? Nixing file!")
 			return

@@ -1,11 +1,19 @@
 package cdsre.files
 
-import cdsre.utils.EndianRandomAccessFile
+import cdsre.utils.streams.EndianRandomAccessFile
 import java.io.File
 import java.io.FileNotFoundException
+import java.nio.file.Paths
 
-@kotlin.ExperimentalUnsignedTypes
-class ROM private constructor(val file: File) {
+/**
+ * Class representing a '.nds' file, or the equivalent unpacked
+ * root directory.
+ *
+ * @param file: The file being loaded. Could be either a file or a
+ * 				directory. If it doesn't exist, this ROM is being
+ * 				created from scratch.
+ */
+class ROM private constructor(file: File) : NitroFS(file.isFile) {
 
 	companion object {
 		@JvmStatic
@@ -15,10 +23,11 @@ class ROM private constructor(val file: File) {
 	}
 
 	protected val narcCache: MutableMap<String, NARC> = mutableMapOf()
+	protected val path: String = file.path
 
-	val gameTitle: String
-	val gameCode: String
-	val makerCode: String
+	var gameTitle: String
+	var gameCode: String
+	var makerCode: String
 	val unitCode: UByte
 	val encryptionSeedSelect: UByte
 	val deviceCapacity: UByte  // TODO: maybe make this equal to 128kb shl value when set?
@@ -31,10 +40,11 @@ class ROM private constructor(val file: File) {
 	val arm7Config: ARMConfig
 
 	val fntOffset: UInt
-	val fntSize: UInt
+
+	override val allocationTable: MutableList<NitroAlloc>
+	override val filenameTable: NitroRoot
 
 	val fatOffset: UInt
-	val fatSize: UInt
 
 	val portSettingsNormal: UInt
 	val portSettingsKey1: UInt
@@ -47,10 +57,13 @@ class ROM private constructor(val file: File) {
 	val secureAreaDisable: ULong
 
 	val totalUsedSize: UInt
+
 	val headerSize: UInt
+		get() = 0x4000u
 
 	val nintendoLogo: ByteArray
 	val logoChecksum: UShort
+		get() = 0xCF56u
 	val headerChecksum: UShort
 
 	val debugOffset: UInt
@@ -59,7 +72,6 @@ class ROM private constructor(val file: File) {
 
 
 	init {
-		// TODO: load ROM
 		if (file.isFile) {
 			// TODO: Load .nds
 			val reader = EndianRandomAccessFile(file, "r")
@@ -91,10 +103,11 @@ class ROM private constructor(val file: File) {
 			val size7 = reader.readUInt()
 
 			fntOffset = reader.readUInt()
-			fntSize = reader.readUInt()
+			// Skip over FNT size
+			reader.seek(reader.filePointer + 4)
 
 			fatOffset = reader.readUInt()
-			fatSize = reader.readUInt()
+			val fatSize = reader.readUInt()
 
 			val overlayOffset9 = reader.readUInt()
 			val overlaySize9 = reader.readUInt()
@@ -113,14 +126,19 @@ class ROM private constructor(val file: File) {
 
 			secureAreaDisable = reader.readULong()
 			totalUsedSize = reader.readUInt()
-			headerSize = reader.readUInt()
+
+			// Skip over header size
+			reader.seek(reader.filePointer + 0x4)
 
 			// Skip over more reserved memory
 			reader.seek(reader.filePointer + 0x38)
 
 			nintendoLogo = ByteArray(0x9C)
 			reader.read(nintendoLogo)
-			logoChecksum = reader.readUShort()
+
+			// Skip over logo checksum
+			reader.seek(reader.filePointer + 2)
+
 			headerChecksum = reader.readUShort()
 
 			debugOffset = reader.readUInt()
@@ -136,11 +154,11 @@ class ROM private constructor(val file: File) {
 
 			iconTitle = readIconTitle(reader)
 
-			// TODO: read fnt and fat
+			allocationTable = readFAT(reader, fatOffset, fatSize)
+			filenameTable = readFNT(reader, fntOffset)
 
 		} else if (file.isDirectory) {
-			// TODO: Load unpacked
-
+			TODO("not implemented")
 			gameTitle = ""
 			gameCode = ""
 			makerCode = ""
@@ -159,9 +177,9 @@ class ROM private constructor(val file: File) {
 			)
 
 			fntOffset = 0u
-			fntSize = 0u
+			filenameTable = NitroRoot(4u, 0u, 1u)
 			fatOffset = 0u
-			fatSize = 0u
+			allocationTable = mutableListOf()
 			portSettingsNormal = 0u
 			portSettingsKey1 = 0u
 			iconTitleOffset = 0u
@@ -169,9 +187,7 @@ class ROM private constructor(val file: File) {
 			secureAreaDelay = 0u
 			secureAreaDisable = 0u
 			totalUsedSize = 0u
-			headerSize = 0u
 			nintendoLogo = ByteArray(0)
-			logoChecksum = 0u
 			headerChecksum = 0u
 			debugOffset = 0u
 			debugSize = 0u
@@ -221,14 +237,22 @@ class ROM private constructor(val file: File) {
 			titleGerman, titleItalian, titleSpanish, titleChinese, titleKorean)
 	}
 
+	// Internal load functions
+
 	private fun loadNarc(path: String): NARC {
-		// TODO: Load NARC file
-		return NARC.loadNARC(File("."))
+		if(narcCache[path] != null) {
+			return narcCache[path] ?: throw ConcurrentModificationException()
+		} else {
+			val romFile = getFile(path)
+			val narc = NARC.loadNARC(romFile)
+			narcCache[path] = narc
+			return NARC.loadNARC(romFile)
+		}
 	}
 
-	fun getNarc(name: String): NARC? {
-		// TODO: NARC from path
+	// Public API
 
+	fun getNarc(name: String): NARC? {
 		return try {
 			loadNarc(name)
 		} catch (e: FileNotFoundException) {
@@ -236,7 +260,19 @@ class ROM private constructor(val file: File) {
 		}
 	}
 
+	override fun getFile(path: String): NitroFile {
+		if(!packed) {
+			val file = Paths.get(this.path, path).toFile()
+			if (!file.exists())
+				throw FileNotFoundException()
+			return RealNitroFile(Paths.get(this.path, path).toFile(), path)
+		} else {
+			val alloc = this.filenameTable.getChild(path.split("\\", "/")) ?: throw FileNotFoundException()
+			return VirtualNitroFile(File(this.path), alloc, path, this)
+		}
+	}
+
 	fun save() {
-		// TODO: Save ROM
+		TODO("not implemented")
 	}
 }

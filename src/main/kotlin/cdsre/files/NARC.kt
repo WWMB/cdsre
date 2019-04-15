@@ -1,17 +1,17 @@
 package cdsre.files
 
 import cdsre.utils.Constants
-import cdsre.utils.EndianRandomAccessFile
+import cdsre.utils.streams.EndianData
 import java.io.File
+import java.io.FileNotFoundException
 
 /**
  * Class representing a `.narc` file in memory.
  *
- * @param file: The file being loaded, or null if this NARC is being created from scratch
- * @param name: The name to assign to this narc, if file is null.
+ * @param file: The file being loaded. If it doesn't exist, this NARC is being created
+ *              from scratch.
  */
-@kotlin.ExperimentalUnsignedTypes
-class NARC private constructor(file: File?, name: String = "") {
+class NARC private constructor(protected val file: NitroFile) : NitroFS(file.isVirtual) {
 
 	companion object {
 
@@ -23,61 +23,99 @@ class NARC private constructor(file: File?, name: String = "") {
 		 */
 		@JvmStatic
 		fun loadNARC(file: File): NARC {
+            val romFile = RealNitroFile(file, file.path)
+			return NARC(romFile)
+		}
+
+		/**
+		 * Loads a NARC from inside of a ROM and returns it
+		 *
+		 * @param file: File to load from
+		 * @return: New loaded NARC object
+		 */
+		@JvmStatic
+		fun loadNARC(file: NitroFile): NARC {
 			return NARC(file)
 		}
 	}
 
-	val filename: String = file?.name ?: "$name.narc"
-
+	/**
+	 * The total size of this NARC in memory, if it were written to a file
+	 */
 	val fileSize: UInt
 		get() {
 			return headerSize + fatbSize + fntbSize + fimgSize
 		}
 
+	/**
+	 * The size of the NARC header
+	 */
 	val headerSize: UShort
 		get() = 16u
 
+	/**
+	 * The number of sections in the NARC
+	 */
 	val numSections: UShort
 		get() = 3u
 
+	/**
+	 * The number of files in this NARC
+	 */
 	val numFiles: UInt
-		get() = files.size.toUInt()
+		get() = memoryFiles.size.toUInt()
 
+	/**
+	 * The size of the FATB header
+	 */
 	val fatbHeaderSize: UInt
 		get() = 12u
 
+	/**
+	 * The total size of the FATB section
+	 */
 	val fatbSize: UInt
-		get() = fatbHeaderSize + files.size.toUInt() * 8u
+		get() = fatbHeaderSize + fatSize
 
+	/**
+	 * The size of the FNTB header
+	 */
+	val fntbHeaderSize: UInt
+		get() = 8u
+
+	/**
+	 * The total size of the FNTB section
+	 */
 	val fntbSize: UInt
-		get() {
-			var out = 8u
-			for(item in filenameTable) {
-				out += item.size
-			}
-			return out
-		}
+		get() = fntbHeaderSize + fntSize
 
+	/**
+	 * The total size of the FIMG section
+	 */
 	val fimgSize: UInt
 		get() {
 			var out = 8u
-			for(file in files) {
-				out += file.size
+			for(file in memoryFiles) {
+				out += file.size.toUInt()
 			}
 			return out
 		}
 
-	protected var allocationTable: List<NARCAlloc>
-	var filenameTable: MutableList<NARCFilename>
-	var files: MutableList<NARCFile>
+	override val allocationTable: MutableList<NitroAlloc>
+	override val filenameTable: NitroRoot
+
+	/**
+	 * Holds the in-memory files for the NitroFS in-memory interface
+	 */
+    private val memoryFiles: MutableList<ByteArray>
 
 	init {
-		if(file == null) {
-			allocationTable = listOf()
-			filenameTable = mutableListOf()
-			files = mutableListOf()
+		if(!file.exists) {
+			allocationTable = mutableListOf()
+			filenameTable = NitroRoot(4u, 0u, 1u)
+			memoryFiles = mutableListOf()
 		} else {
-			val reader = EndianRandomAccessFile(file, "r")
+			val reader = file.randomAccessFile()
 
 			val magic = reader.readString(4)
 			if(magic != "NARC" && magic != "CRAN") {
@@ -94,103 +132,127 @@ class NARC private constructor(file: File?, name: String = "") {
 
 			allocationTable = readFATB(reader)
 			filenameTable = readFNTB(reader)
-			files = readFIMG(reader)
+			memoryFiles = readFIMG(reader)
 
 			reader.close()
 		}
 	}
 
 	/**
-	 * Read the File Allocation Table from the NARC being loaded.
+	 * Read the FATB section of the NARC being loaded.
 	 *
 	 * @param reader: RandomAccess class being used to read the file
 	 * @return: List of NARC allocations
 	 */
-	protected fun readFATB(reader: EndianRandomAccessFile): List<NARCAlloc> {
+	protected fun readFATB(reader: EndianData): MutableList<NitroAlloc> {
 		val magic = reader.readString(4)
 		if(magic != "FATB" && magic != "BTAF") {
 			System.err.println("Allocation table ${Constants.BAD_MAGIC}")
 		}
-
-		val newList: MutableList<NARCAlloc> = ArrayList()
 
 		val size = reader.readUInt()
 		val numFiles = reader.readUInt()
 
 		assert(size == (12u + numFiles * 8u))
 
-		for(i in 1u..numFiles) {
-			val start = reader.readUInt()
-			val end = reader.readUInt()
-			newList.add(NARCAlloc(start, end))
-		}
-
-		return newList
+		return readFAT(reader, reader.filePointer.toUInt(), size - 12u)
 	}
 
 	/**
-	 * Read the File Name Table from the NARC being loaded
+	 * Read the FNTB section of the NARC being loaded
 	 *
 	 * @param reader: RandomAccess class being used to read the file
 	 * @return: List of NARC Filenames objects, defining the filenames and directory
 	 * 			structure of the NARC
 	 */
-	protected fun readFNTB(reader: EndianRandomAccessFile): MutableList<NARCFilename> {
+	protected fun readFNTB(reader: EndianData): NitroRoot {
 		val magic = reader.readString(4)
 		if(magic != "FNTB" && magic != "BTNF") {
 			System.err.println("Filename table ${Constants.BAD_MAGIC}")
 		}
 
 		val sectionSize = reader.readUInt()
+		val startPointer = reader.filePointer
+		val result = readFNT(reader, startPointer.toUInt())
+		reader.seek(startPointer + sectionSize.toLong() - 8)
 
-		val newList: MutableList<NARCFilename> = ArrayList()
+		return result
+	}
 
-		var pos: UInt = 8u
-		while(pos < sectionSize) {
-			val startOffset = reader.readUInt()
-			val firstFilePos = reader.readUShort()
-			val parentDir = reader.readUShort()
-			pos += 8u
+	/**
+	 * Read the FIMG section of the NARC being loaded
+	 *
+	 * @param reader: RandomAccess class being used to read the file
+	 * @return: List of NARC files, data objects containing the raw file bytes
+	 */
+	protected fun readFIMG(reader: EndianData): MutableList<ByteArray> {
+		val magic = reader.readString(4)
+		if(magic != "FIMG" && magic != "GMIF") {
+			System.err.println("Image Table ${Constants.BAD_MAGIC}")
+		}
 
-			var name: String? = null
-			if(pos < sectionSize) {
-				val nameSize = reader.readUByte()
-				System.out.println(nameSize)
-				name = reader.readString(nameSize)
-				pos += 1u + nameSize
-			}
+		val length = reader.readUInt()
 
-			newList.add(NARCFilename(startOffset, firstFilePos, parentDir, name))
+		val newList: MutableList<ByteArray> = ArrayList()
+
+		for(alloc in allocationTable) {
+			val size = alloc.end - alloc.start
+			val array = ByteArray(size.toInt())
+			reader.read(array)
+			newList.add(array)
 		}
 
 		return newList
 	}
 
 	/**
-	 * Read the File Image table from the NARC being loaded
-	 *
-	 * @param reader: RandomAccess class being used to read the file
-	 * @return: List of NARC files, data objects containing the raw file bytes
+	 * NARC files do support the in-memory interface
 	 */
-	protected fun readFIMG(reader: EndianRandomAccessFile): MutableList<NARCFile> {
-		val magic = reader.readString(4)
-		if(magic != "FIMG" && magic != "GMIF") {
-			System.err.println("Image Table ${Constants.BAD_MAGIC}")
-		}
+    override val inMemory: Boolean
+        get() = true
 
-		// This will need to be changed to support nested directories
-		reader.seek(reader.filePointer + filenameTable[0].startOffset.toLong())
+	/**
+	 * Converts a NitroAlloc to its ID into the in-memory files
+	 */
+    override fun getIdFromAlloc(alloc: NitroAlloc): Int {
+        for (id in 0 until allocationTable.size) {
+            if (allocationTable[id] == alloc) {
+                return id
+            }
+        }
+        return -1
+    }
 
-		val newList: MutableList<NARCFile> = ArrayList()
+	/**
+	 * Return the bytearray of an in-memory file
+	 *
+	 * @param id: The id of the file to get
+	 * @return: A ByteArray containing the data in the given file
+	 */
+    override fun getInMemory(id: Int): ByteArray {
+        return memoryFiles[id]
+    }
 
-		for(alloc in allocationTable) {
-			val size = alloc.end - alloc.start
-			val array = ByteArray(size.toInt())
-			reader.read(array)
-			newList.add(NARCFile(array))
-		}
+	/**
+	 * Set the byte array of an in-memory file
+	 *
+	 * @param id: The id of the file to set
+	 * @param arr: The ByteArray to set the file to
+	 */
+    override fun setInMemory(id: Int, arr: ByteArray) {
+        memoryFiles[id] = arr
+		// TODO: Refresh allocs when this is done
+    }
 
-		return newList
+	/**
+	 * Get a NitroFile pointing to the desired file path. For a NARC,
+	 * this will always be a VirtualNitroFile instance
+	 *
+	 * @param path: Path of the desired file
+	 */
+	override fun getFile(path: String): NitroFile {
+		val alloc = this.filenameTable.getChild(path.split("/", "\\")) ?: throw FileNotFoundException()
+		return VirtualNitroFile(this.file, alloc, path, this)
 	}
 
 	/**
@@ -200,7 +262,8 @@ class NARC private constructor(file: File?, name: String = "") {
 	 * 				exist, or overwritten if it already does.
 	 */
 	fun save(file: File) {
-		val output = EndianRandomAccessFile(file, "rw")
+		TODO("not implemented")
+		/*val output = EndianRandomAccessFile(file, "rw")
 
 		// Write header
 		output.writeString("NARC")
@@ -220,16 +283,16 @@ class NARC private constructor(file: File?, name: String = "") {
 		}
 
 		output.writeString("BTNF")
-		output.writeUInt(fntbSize)
-		for(item in filenameTable) {
+		output.writeUInt(fntSize + 8u)
+		/*for(item in filenameTable) {
 			output.writeUInt(item.startOffset)
-			output.writeUShort(item.firstFilePos)
+			output.writeUShort(item.firstFileID)
 			output.writeUShort(item.parentDir)
 			if(item.name != null) {
 				output.writeByte(item.name.length)
 				output.writeString(item.name)
 			}
-		}
+		}*/
 
 		output.writeString("GMIF")
 		output.writeUInt(fimgSize)
@@ -237,6 +300,6 @@ class NARC private constructor(file: File?, name: String = "") {
 			output.write(f.data)
 		}
 
-		output.close()
+		output.close()*/
 	}
 }
